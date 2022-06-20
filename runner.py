@@ -211,7 +211,6 @@ def run(config):
                 optimizer.zero_grad()
                 (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
                 optimizer.step()
-                print(f"G Step loss : {(loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).item()}")
                 wandb.log({'loss_G': loss_G.item()})
                 wandb.log({'loss_pre': loss_pre.item()})
                 wandb.log({'loss_re': loss_re.item()})
@@ -226,25 +225,26 @@ def run(config):
                     F_new = U.T[:config.k_cluster, :]
                     F_new = F_new.T
                     m.update_F(F_new)
-                    print('F_new is updated..')
 
-            '''TEST'''
-            with torch.no_grad():
-                H_outputs = []
-                for batch_data, batch_label, batch_mask, batch_length, batch_lengthmark in get_batch(test_data,test_label,test_mask,test_length,test_lengthmark,config):
-                    data = {}
-                    data['values'] = batch_data
-                    data['masks'] = batch_mask
-                    # get outputs["H"]
-                    imputed, disc_output, latent, reconstructed = m(data)
-                    H_outputs.append(latent)
-                H_outputs = torch.concat(H_outputs, 0)
-                H_outputs = H_outputs[:test_dataset_size, :]
-                Km = KMeans(n_clusters=config.k_cluster)
-                pred_H = Km.fit_predict(H_outputs.cpu().detach().numpy())
+        '''TEST'''
+        with torch.no_grad():
+            H_outputs = []
+            for batch_data, batch_label, batch_mask, batch_length, batch_lengthmark in get_batch(test_data,test_label,test_mask,test_length,test_lengthmark,config):
+                data = {}
+                data['values'] = batch_data
+                data['masks'] = batch_mask
+                # get outputs["H"]
+                imputed, disc_output, latent, reconstructed = m(data)
+                H_outputs.append(latent)
+            H_outputs = torch.concat(H_outputs, 0)
+            H_outputs = H_outputs[:test_dataset_size, :]
+            Km = KMeans(n_clusters=config.k_cluster)
+            pred_H = Km.fit_predict(H_outputs.cpu().detach().numpy())
 
             '''record'''
             ri,nmi,acc,pur = assess(pred_H,test_label)
+            print(f'epoch : {i}, acc : {acc}')
+            wandb.log({'accuracy' : acc})
             RI.append(ri)
             NMI.append(nmi)
             ACC.append(acc)
