@@ -10,13 +10,8 @@ from scipy.optimize import linear_sum_assignment
 from models import CRLI
 import torch.nn.functional as F
 
-
 warnings.filterwarnings("ignore")
 parser = argparse.ArgumentParser()
-
-
-def mse_error(pred, target):
-    return nn.MSELoss()(pred, target)
 
 
 def pur_metric(pred, target):
@@ -81,15 +76,18 @@ def load_mask(filename):
     mask = mask_label[:,1:].astype(np.float32)
     return mask
 
+
 def load_data(filename):
     data_label = np.loadtxt(filename,delimiter = ",")
     data = data_label[:,1:].astype(np.float32)
     label = data_label[:,0].astype(np.int32)
     return data,label
 
+
 def load_length(filename):
     length = np.loadtxt(filename,delimiter = ",")
     return length
+
 
 def load_lengthmark(filename):
     lengthmark = np.loadtxt(filename,delimiter = ",")
@@ -122,7 +120,6 @@ def get_batch(data, label, mask, length, lengthmark, config):
         batch_length = np.concatenate((length[-left_row:],length[need_more]), axis=0)
         batch_lengthmark = np.concatenate((lengthmark[-left_row:,:],lengthmark[need_more,:]), axis=0)
         yield (batch_data,batch_label,batch_mask,batch_length,batch_lengthmark)
-
 
 
 def run(config):
@@ -175,11 +172,6 @@ def run(config):
         for batch_data, batch_label, batch_mask, batch_length, batch_lengthmark in get_batch(
                 train_data, train_label, train_mask, train_length, train_lengthmark, config):
             GLOBAL_STEP += 1
-            # batch_data (32,16)
-            # batch_label (32, )  filled with 1 or 0
-            # bath length (32, )  filled with 16
-            # batch lengthmark (32, 16)
-            # batch mask (32,16)
             data = {}
             data['values'] = batch_data
             data['masks'] = batch_mask
@@ -188,11 +180,12 @@ def run(config):
                 # run disc loss
                 loss_D = F.binary_cross_entropy_with_logits(disc_output.squeeze(), batch_mask).mean()
                 # backward
+                loss_D.backward()
+                print(f"D Step loss : {loss_D.item()}")
 
             for j in range(config.G_steps):
                 # run gen
                 imputed, disc_output, latent, reconstructed = m(data)
-                # loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans
                 loss_G = F.binary_cross_entropy_with_logits(disc_output.squeeze(), 1-batch_mask).mean()
 
                 # loss_pre
@@ -211,6 +204,9 @@ def run(config):
                 FTHTHF = torch.matmul(torch.matmul(m.F.T, HTH), m.F)
                 loss_km = torch.trace(HTH) - torch.trace(FTHTHF)
 
+                (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
+                print(f"G Step loss : {loss_D.item()}")
+
                 if i % config.T_update_F == 0:
                     '''calculate F'''
                     # run H
@@ -222,18 +218,19 @@ def run(config):
                     m.update_F(F_new)
 
             '''TEST'''
-            H_outputs = []
-            for batch_data, batch_label, batch_mask, batch_length, batch_lengthmark in get_batch(test_data,test_label,test_mask,test_length,test_lengthmark,config):
-                data = {}
-                data['values'] = batch_data
-                data['masks'] = batch_mask
-                # get outputs["H"]
-                imputed, disc_output, latent, reconstructed = m(data)
-                H_outputs.append(latent)
-            H_outputs = torch.concat(H_outputs, 0)
-            H_outputs = H_outputs[:test_dataset_size, :]
-            Km = KMeans(n_clusters=config.k_cluster)
-            pred_H = Km.fit_predict(H_outputs.cpu().detach().numpy())
+            with torch.no_grad():
+                H_outputs = []
+                for batch_data, batch_label, batch_mask, batch_length, batch_lengthmark in get_batch(test_data,test_label,test_mask,test_length,test_lengthmark,config):
+                    data = {}
+                    data['values'] = batch_data
+                    data['masks'] = batch_mask
+                    # get outputs["H"]
+                    imputed, disc_output, latent, reconstructed = m(data)
+                    H_outputs.append(latent)
+                H_outputs = torch.concat(H_outputs, 0)
+                H_outputs = H_outputs[:test_dataset_size, :]
+                Km = KMeans(n_clusters=config.k_cluster)
+                pred_H = Km.fit_predict(H_outputs.cpu().detach().numpy())
 
             '''record'''
             ri,nmi,acc,pur = assess(pred_H,test_label)
