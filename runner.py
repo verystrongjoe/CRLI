@@ -9,6 +9,7 @@ import torch.nn as nn
 from scipy.optimize import linear_sum_assignment
 from models import CRLI
 import torch.nn.functional as F
+import wandb
 
 warnings.filterwarnings("ignore")
 parser = argparse.ArgumentParser()
@@ -166,6 +167,7 @@ def run(config):
     GLOBAL_STEP = -1
 
     m = CRLI(config)
+    optimizer = torch.optim.Adam(m.parameters(), lr=config.learning_rate)
 
     for i in range(config.epoch):
         '''Train'''
@@ -180,8 +182,10 @@ def run(config):
                 # run disc loss
                 loss_D = F.binary_cross_entropy_with_logits(disc_output.squeeze(), batch_mask).mean()
                 # backward
+                optimizer.zero_grad()
                 loss_D.backward()
-                print(f"D Step loss : {loss_D.item()}")
+                optimizer.step()
+                wandb.log({'D Step loss' : loss_D.item()})
 
             for j in range(config.G_steps):
                 # run gen
@@ -204,8 +208,14 @@ def run(config):
                 FTHTHF = torch.matmul(torch.matmul(m.F.T, HTH), m.F)
                 loss_km = torch.trace(HTH) - torch.trace(FTHTHF)
 
+                optimizer.zero_grad()
                 (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
-                print(f"G Step loss : {loss_D.item()}")
+                optimizer.step()
+                print(f"G Step loss : {(loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).item()}")
+                wandb.log({'loss_G': loss_G.item()})
+                wandb.log({'loss_pre': loss_pre.item()})
+                wandb.log({'loss_re': loss_re.item()})
+                wandb.log({'loss_km': loss_km.item()})
 
                 if i % config.T_update_F == 0:
                     '''calculate F'''
@@ -216,6 +226,7 @@ def run(config):
                     F_new = U.T[:config.k_cluster, :]
                     F_new = F_new.T
                     m.update_F(F_new)
+                    print('F_new is updated..')
 
             '''TEST'''
             with torch.no_grad():
@@ -267,6 +278,9 @@ if __name__ == '__main__':
     parser.add_argument('--gpu_num', type=int, required=False, default=0)
 
     config = parser.parse_args()
+
+    wandb.init(config=config, project='crli')
+
     ri, nmi, pur, cluster_acc = run(config)
 
     print('%s,%.6f,%.6f,%.6f,%.6f' % (config.dataset_name, ri, nmi, pur, cluster_acc))

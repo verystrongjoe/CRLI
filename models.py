@@ -171,6 +171,8 @@ class CRLI(nn.Module):
         return imputed, disc_output, latent, reconstructed
 
     def update_F(self, F_new):
-        self.F = F_new
+        #  assign a new value to a pytorch Variable without breaking backpropagation!!
+        #  thanks to https://stackoverflow.com/questions/53819383/how-to-assign-a-new-value-to-a-pytorch-variable-without-breaking-backpropagation
+        self.F.data = F_new.data
 
 
