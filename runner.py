@@ -58,7 +58,6 @@ def _accuracy(y_pred, y_true):
             w[Y_pred[i], Y[i]] += 1
         ind = linear_sum_assignment(w.max() - w)
         return sum([w[i, j] for i, j in ind]) * 1.0 / Y_pred.size, np.array(w)
-
     y_pred = np.array(y_pred, np.int32)
     y_true = np.array(y_true, np.int32)
     return cluster_acc(y_pred, y_true)
@@ -95,7 +94,7 @@ def load_lengthmark(filename):
     return lengthmark
 
 
-def get_batch(data, label, mask, length, lengthmark, config):
+def get_batch(data, mask, config):
     samples_num = data.shape[0]
     batch_num = int(samples_num / config.batch_size)
     left_row = samples_num - batch_num * config.batch_size
@@ -106,53 +105,31 @@ def get_batch(data, label, mask, length, lengthmark, config):
 
     for i in range(batch_num):
         batch_data = data[i * config.batch_size: (i + 1) * config.batch_size, :]
-        batch_label = label[i * config.batch_size: (i + 1) * config.batch_size]
         batch_mask = mask[i * config.batch_size: (i + 1) * config.batch_size, :]
-        batch_length = length[i * config.batch_size: (i + 1) * config.batch_size]
-        batch_lengthmark = lengthmark[i * config.batch_size: (i + 1) * config.batch_size,:]
-        yield (batch_data,batch_label,batch_mask,batch_length,batch_lengthmark)
+        yield (batch_data, batch_mask)
 
     if left_row != 0:
         need_more = config.batch_size - left_row
         need_more = np.random.choice(np.arange(samples_num), size=need_more)
         batch_data = torch.concat((data[-left_row:, :], data[need_more,:]), axis=0)
-        batch_label = np.concatenate((label[-left_row:],label[need_more]), axis=0)
         batch_mask = torch.concat((mask[-left_row:, :], mask[need_more,:]), axis=0)
-        batch_length = np.concatenate((length[-left_row:],length[need_more]), axis=0)
-        batch_lengthmark = np.concatenate((lengthmark[-left_row:,:],lengthmark[need_more,:]), axis=0)
-        yield (batch_data,batch_label,batch_mask,batch_length,batch_lengthmark)
+        yield (batch_data, batch_mask)
 
 
 def run(config):
-    '''data'''
     train_data_filename = config.data_dir + "/" + config.dataset_name + "/" + config.dataset_name + "_TRAIN"
     train_data, train_label = load_data(train_data_filename)
     test_data_filename = train_data_filename.replace('TRAIN', 'TEST')
     test_data, test_label = load_data(test_data_filename)
 
-    '''mask'''
     train_maskname = config.data_dir + "/" + config.dataset_name + "/" + "mask_" + config.dataset_name + "_TRAIN"
     train_mask = load_mask(train_maskname)
     test_maskname = train_maskname.replace('TRAIN', 'TEST')
     test_mask = load_mask(test_maskname)
 
-    '''length'''
-    train_length_filename = config.data_dir + "/" + config.dataset_name + "/" + 'length_' + config.dataset_name + "_TRAIN"
-    train_length = load_length(train_length_filename)
-    test_length_filename = train_length_filename.replace('TRAIN', 'TEST')
-    test_length = load_length(test_length_filename)
-
-    '''train_lengthmark'''
-    train_lengthmark_filename = config.data_dir + "/" + config.dataset_name + "/" + 'lengthmark_' + config.dataset_name + "_TRAIN"
-    train_lengthmark = load_lengthmark(train_lengthmark_filename)
-    test_lengthmark_filename = train_lengthmark_filename.replace('TRAIN', 'TEST')
-    test_lengthmark = load_length(test_lengthmark_filename)
-
     train_dataset_size = train_data.shape[0]
     test_dataset_size = test_data.shape[0]
-    config.inputdims = 1
-    config.n_steps = train_data.shape[1] // config.inputdims
-    config.k_cluster = len(np.unique(train_label))
+    config.k_cluster = len(np.unique(train_label))  # useless for me
     config.train_dataset_size = train_dataset_size
 
     if config.batch_size > train_dataset_size:
@@ -170,25 +147,25 @@ def run(config):
     optimizer = torch.optim.Adam(m.parameters(), lr=config.learning_rate)
 
     for i in range(config.epoch):
-        '''Train'''
-        for batch_data, batch_label, batch_mask, batch_length, batch_lengthmark in get_batch(
-                train_data, train_label, train_mask, train_length, train_lengthmark, config):
+        ####################################################################################################
+        # Train
+        ####################################################################################################
+        for batch_data, batch_mask in get_batch(train_data, train_mask, config):
             GLOBAL_STEP += 1
             data = {}
             data['values'] = batch_data
             data['masks'] = batch_mask
             for _ in range(config.D_steps):
                 imputed, disc_output, latent, reconstructed = m(data)
-                # run disc loss
+                # discriminator
                 loss_D = F.binary_cross_entropy_with_logits(disc_output.squeeze(), batch_mask).mean()
-                # backward
                 optimizer.zero_grad()
                 loss_D.backward()
                 optimizer.step()
-                wandb.log({'D Step loss' : loss_D.item()})
+                wandb.log({'D Step loss': loss_D.item()})
 
             for j in range(config.G_steps):
-                # run gen
+                # run generator
                 imputed, disc_output, latent, reconstructed = m(data)
                 loss_G = F.binary_cross_entropy_with_logits(disc_output.squeeze(), 1-batch_mask).mean()
 
@@ -200,7 +177,6 @@ def run(config):
                 # loss_re
                 out_tmp = reconstructed.squeeze() * batch_mask
                 targ_re = batch_data * batch_mask
-                # loss_re = mse_error(out_tmp, targ_re)
                 loss_re = nn.MSELoss()(out_tmp, targ_re)
 
                 # loss_km
@@ -211,29 +187,30 @@ def run(config):
                 optimizer.zero_grad()
                 (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
                 optimizer.step()
+
                 wandb.log({'loss_G': loss_G.item()})
                 wandb.log({'loss_pre': loss_pre.item()})
                 wandb.log({'loss_re': loss_re.item()})
                 wandb.log({'loss_km': loss_km.item()})
+                wandb.log({'G_step loss': (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).item()})
 
                 if i % config.T_update_F == 0:
-                    '''calculate F'''
-                    # run H
-                    imputed, disc_output, latent, reconstructed = m(data)
                     # F_update
+                    imputed, disc_output, latent, reconstructed = m(data)
                     U, s, V = torch.linalg.svd(latent)
                     F_new = U.T[:config.k_cluster, :]
                     F_new = F_new.T
                     m.update_F(F_new)
 
-        '''TEST'''
+        ####################################################################################################
+        # TEST
+        ####################################################################################################
         with torch.no_grad():
             H_outputs = []
-            for batch_data, batch_label, batch_mask, batch_length, batch_lengthmark in get_batch(test_data,test_label,test_mask,test_length,test_lengthmark,config):
+            for batch_data, batch_mask in get_batch(test_data, test_mask, config):
                 data = {}
                 data['values'] = batch_data
                 data['masks'] = batch_mask
-                # get outputs["H"]
                 imputed, disc_output, latent, reconstructed = m(data)
                 H_outputs.append(latent)
             H_outputs = torch.concat(H_outputs, 0)
@@ -241,7 +218,9 @@ def run(config):
             Km = KMeans(n_clusters=config.k_cluster)
             pred_H = Km.fit_predict(H_outputs.cpu().detach().numpy())
 
-            '''record'''
+            ####################################################################################################
+            # ASSESMENT
+            ####################################################################################################
             ri,nmi,acc,pur = assess(pred_H,test_label)
             print(f'epoch : {i}, acc : {acc}')
             wandb.log({'accuracy' : acc})
@@ -249,7 +228,6 @@ def run(config):
             NMI.append(nmi)
             ACC.append(acc)
             PUR.append(pur)
-
 
     ri = max(RI[80], RI[300], RI[500])
     nmi = max(NMI[80], NMI[300], NMI[500])
