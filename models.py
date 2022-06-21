@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+import argparse
 
 
 class Generator(nn.Module):
@@ -142,15 +143,17 @@ class Discriminator(nn.Module):
 class CRLI(nn.Module):
     def __init__(self, config):
         rnn_hid_size = config.G_hiddensize
-        latent_dim = 16
-        output_dim = 1
+        latent_dim = config.latent_dim
+        output_dim = config.input_dim
 
         super(CRLI, self).__init__()
         self.config = config
         self.device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
 
-        # upper branch
+        # start branch
         self.generator = Generator(config=config)
+
+        # upper branch
         self.discriminator = Discriminator(self.config)
 
         # lower branch
@@ -161,7 +164,6 @@ class CRLI(nn.Module):
         f = torch.empty(config.batch_size, config.k_cluster, dtype=torch.float32)
         torch.nn.init.orthogonal_(f, gain=1)
         self.F = torch.autograd.Variable(f, requires_grad=False).to(self.device)
-
 
     def forward(self, x):
         h, imputed = self.generator(x)
@@ -175,4 +177,24 @@ class CRLI(nn.Module):
         #  thanks to https://stackoverflow.com/questions/53819383/how-to-assign-a-new-value-to-a-pytorch-variable-without-breaking-backpropagation
         self.F.data = F_new.data
 
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch_size', type=int, required=False, default=32)
+    parser.add_argument('--T_update_F', type=int, required=False, default=1)
+    parser.add_argument('--G_steps', type=int, required=False, default=1)
+    parser.add_argument('--D_steps', type=int, required=False, default=1)
+    parser.add_argument('--epoch', type=int, required=False, default=500)
+    parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
+    parser.add_argument('--dataset_name', type=str, required=False, default='BloodSample') #  HouseVote
+    parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
+    parser.add_argument('--G_hiddensize', type=int, required=False, default=200)
+    parser.add_argument('--G_layer', type=int, required=False, default=1)
+    parser.add_argument('--IsD', type=bool, required=False, default=False)
+    parser.add_argument('--cell_type', type=str, required=False, default='gru')
+    parser.add_argument('--data_dir', type=str, required=False, default='dataset')
+    parser.add_argument('--seq_len', type=int, required=False, default=200)
+    parser.add_argument('--gpu_num', type=int, required=False, default=0)
 
+    config = parser.parse_args()
+
+    m = CRLI()

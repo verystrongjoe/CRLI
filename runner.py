@@ -144,7 +144,18 @@ def run(config):
     GLOBAL_STEP = -1
 
     m = CRLI(config)
-    optimizer = torch.optim.Adam(m.parameters(), lr=config.learning_rate)
+
+    gen_params = []
+    disc_params = []
+
+    for name, param in m.named_parameters():
+        if 'discriminator' in name:
+            disc_params.append(param)
+        else:
+            gen_params.append(param)
+
+    disc_optimizer = torch.optim.Adam(disc_params, lr=config.learning_rate)
+    gen_optimizer = torch.optim.Adam(gen_params, lr=config.learning_rate)
 
     for i in range(config.epoch):
         ####################################################################################################
@@ -159,9 +170,9 @@ def run(config):
                 imputed, disc_output, latent, reconstructed = m(data)
                 # discriminator
                 loss_D = F.binary_cross_entropy_with_logits(disc_output.squeeze(), batch_mask).mean()
-                optimizer.zero_grad()
+                disc_optimizer.zero_grad()
                 loss_D.backward()
-                optimizer.step()
+                disc_optimizer.step()
                 wandb.log({'D Step loss': loss_D.item()})
 
             for j in range(config.G_steps):
@@ -184,9 +195,9 @@ def run(config):
                 FTHTHF = torch.matmul(torch.matmul(m.F.T, HTH), m.F)
                 loss_km = torch.trace(HTH) - torch.trace(FTHTHF)
 
-                optimizer.zero_grad()
+                gen_optimizer.zero_grad()
                 (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
-                optimizer.step()
+                gen_optimizer.step()
 
                 wandb.log({'loss_G': loss_G.item()})
                 wandb.log({'loss_pre': loss_pre.item()})
@@ -222,8 +233,9 @@ def run(config):
             # ASSESMENT
             ####################################################################################################
             ri,nmi,acc,pur = assess(pred_H,test_label)
-            print(f'epoch : {i}, acc : {acc}')
+            print(f'epoch : {i}, acc : {acc}, ri: {ri}')
             wandb.log({'accuracy' : acc})
+            wandb.log({'ri': ri})
             RI.append(ri)
             NMI.append(nmi)
             ACC.append(acc)
@@ -238,6 +250,7 @@ def run(config):
 
 
 if __name__ == '__main__':
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, required=False, default=32)
     parser.add_argument('--T_update_F', type=int, required=False, default=1)
@@ -245,7 +258,7 @@ if __name__ == '__main__':
     parser.add_argument('--D_steps', type=int, required=False, default=1)
     parser.add_argument('--epoch', type=int, required=False, default=500)
     parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
-    parser.add_argument('--dataset_name', type=str, required=False, default='HouseVote')
+    parser.add_argument('--dataset_name', type=str, required=False, default='HouseVote')  # BloodSample
     parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
     parser.add_argument('--G_hiddensize', type=int, required=False, default=16)
     parser.add_argument('--G_layer', type=int, required=False, default=1)
@@ -254,10 +267,11 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, required=False, default='dataset')
     parser.add_argument('--seq_len', type=int, required=False, default=16)
     parser.add_argument('--gpu_num', type=int, required=False, default=0)
+    parser.add_argument('--input_dim', type=int, required=False, default=1)
 
     config = parser.parse_args()
 
-    wandb.init(config=config, project='crli')
+    wandb.init(config=config, project=f'crli_{config.dataset_name}')
 
     ri, nmi, pur, cluster_acc = run(config)
 
