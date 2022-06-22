@@ -174,7 +174,7 @@ def run(config):
             for _ in range(config.D_steps):
                 disc_output, impute, latent, reconstructed = m(data)
                 # discriminator
-                loss_D = F.binary_cross_entropy_with_logits(disc_output.squeeze(), batch_mask).mean()
+                loss_D = F.binary_cross_entropy_with_logits(disc_output, batch_mask).mean()
                 disc_optimizer.zero_grad()
                 loss_D.backward()
                 disc_optimizer.step()
@@ -183,15 +183,15 @@ def run(config):
             for j in range(config.G_steps):
                 # run generator
                 disc_output, impute, latent, reconstructed = m(data)
-                loss_G = F.binary_cross_entropy_with_logits(disc_output.squeeze(), 1-batch_mask).mean()
+                loss_G = F.binary_cross_entropy_with_logits(disc_output, 1-batch_mask).mean()
 
                 # loss_pre
-                pre_tmp = impute.squeeze() * batch_mask
+                pre_tmp = impute * batch_mask
                 target_pre = batch_data * batch_mask
                 loss_pre = nn.MSELoss()(pre_tmp, target_pre)
 
                 # loss_re
-                out_tmp = reconstructed.squeeze() * batch_mask
+                out_tmp = reconstructed * batch_mask
                 targ_re = batch_data * batch_mask
                 loss_re = nn.MSELoss()(out_tmp, targ_re)
 
@@ -282,15 +282,20 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, required=False, default='dataset')
     parser.add_argument('--gpu_num', type=int, required=False, default=0)
 
-    parser.add_argument('--seq_len', type=int, required=False, default=20)
+    parser.add_argument('--seq_len', type=int, required=False, default=16)
     parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
     parser.add_argument('--dataset_name', type=str, required=False, default='HouseVote')  # BloodSample
     parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
+    parser.add_argument('--input_dim', type=int, required=False, default=1)
+
     parser.add_argument('--G_hiddensize', type=int, required=False, default=20*10)
-    parser.add_argument('--input_dim', type=int, required=False, default=10)
     parser.add_argument('--latent_dim', type=int, required=False, default=20*10)
 
     config = parser.parse_args()
+
+    # update config
+    config.latent_dim = config.seq_len * config.input_dim
+    config.G_hiddensize = config.seq_len * config.input_dim
 
     wandb.init(config=config, project=f'crli_{config.dataset_name}')
 
