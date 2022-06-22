@@ -72,20 +72,20 @@ def assess(pred, target):
 
 
 def load_mask(filename):
-    mask_label = np.loadtxt(filename,delimiter = ",")
+    mask_label = np.loadtxt(filename, delimiter = ",")
     mask = mask_label[:,1:].astype(np.float32)
     return mask
 
 
 def load_data(filename):
-    data_label = np.loadtxt(filename,delimiter = ",")
+    data_label = np.loadtxt(filename, delimiter = ",")
     data = data_label[:,1:].astype(np.float32)
     label = data_label[:,0].astype(np.int32)
     return data,label
 
 
 def load_length(filename):
-    length = np.loadtxt(filename,delimiter = ",")
+    length = np.loadtxt(filename, delimiter = ",")
     return length
 
 
@@ -161,6 +161,13 @@ def run(config):
         ####################################################################################################
         # Train
         ####################################################################################################
+        D_Step_losses = []
+        G_Step_losses = []
+        G_losses = []
+        re_losses = []
+        pre_losses = []
+        km_losses = []
+
         for batch_data, batch_mask in get_batch(train_data, train_mask, config):
             GLOBAL_STEP += 1
             data = {}
@@ -178,7 +185,7 @@ def run(config):
                 disc_optimizer.zero_grad()
                 loss_D.backward()
                 disc_optimizer.step()
-                wandb.log({'D Step loss': loss_D.item()})
+                D_Step_losses.append(loss_D.item())
 
             for j in range(config.G_steps):
                 # run generator
@@ -204,11 +211,12 @@ def run(config):
                 (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
                 gen_optimizer.step()
 
-                wandb.log({'loss_G': loss_G.item()})
-                wandb.log({'loss_pre': loss_pre.item()})
-                wandb.log({'loss_re': loss_re.item()})
-                wandb.log({'loss_km': loss_km.item()})
-                wandb.log({'G_step loss': (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).item()})
+
+                G_Step_losses.append((loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).item())
+                km_losses.append(loss_km.item())
+                pre_losses.append(loss_pre.item())
+                re_losses.append(loss_pre.item())
+                G_losses.append(loss_G.item())
 
                 if i % config.T_update_F == 0:
                     # F_update
@@ -225,7 +233,6 @@ def run(config):
             H_outputs = []
             for batch_data, batch_mask in get_batch(test_data, test_mask, config):
                 data = {}
-
                 batch_data = torch.reshape(batch_data, (config.batch_size, config.seq_len, config.input_dim))
                 batch_mask = torch.reshape(batch_mask, (config.batch_size, config.seq_len, config.input_dim))
 
@@ -243,8 +250,17 @@ def run(config):
             ####################################################################################################
             ri,nmi,acc,pur = assess(pred_H,test_label)
             print(f'epoch : {i}, acc : {acc}, ri: {ri}')
+
+            ## wandb logging
             wandb.log({'accuracy' : acc})
             wandb.log({'ri': ri})
+            wandb.log({'D_step loss': np.mean(D_Step_losses)})
+            wandb.log({'G_step loss': np.mean(G_Step_losses)})
+            wandb.log({'loss_G': np.mean(G_losses)})
+            wandb.log({'loss_pre': np.mean(pre_losses)})
+            wandb.log({'loss_re': np.mean(re_losses)})
+            wandb.log({'loss_km': np.mean(km_losses)})
+
             RI.append(ri)
             NMI.append(nmi)
             ACC.append(acc)
@@ -298,8 +314,9 @@ if __name__ == '__main__':
     config.G_hiddensize = config.seq_len * config.input_dim
 
     wandb.init(config=config, project=f'crli_{config.dataset_name}')
-
+    wandb.config.update(config)
+    wandb_metric_table = wandb.Table(columns=['ri', 'nmi', 'pur', 'cluster_acc'])
     ri, nmi, pur, cluster_acc = run(config)
+    wandb_metric_table.add_data(ri, nmi, pur, cluster_acc)
 
     print('%s,%.6f,%.6f,%.6f,%.6f' % (config.dataset_name, ri, nmi, pur, cluster_acc))
-
