@@ -164,10 +164,15 @@ def run(config):
         for batch_data, batch_mask in get_batch(train_data, train_mask, config):
             GLOBAL_STEP += 1
             data = {}
+
+            batch_data = torch.reshape(batch_data, (config.batch_size, config.seq_len, config.input_dim))
+            batch_mask = torch.reshape(batch_mask, (config.batch_size, config.seq_len, config.input_dim))
+
             data['values'] = batch_data
             data['masks'] = batch_mask
+
             for _ in range(config.D_steps):
-                imputed, disc_output, latent, reconstructed = m(data)
+                disc_output, impute, latent, reconstructed = m(data)
                 # discriminator
                 loss_D = F.binary_cross_entropy_with_logits(disc_output.squeeze(), batch_mask).mean()
                 disc_optimizer.zero_grad()
@@ -177,12 +182,12 @@ def run(config):
 
             for j in range(config.G_steps):
                 # run generator
-                imputed, disc_output, latent, reconstructed = m(data)
+                disc_output, impute, latent, reconstructed = m(data)
                 loss_G = F.binary_cross_entropy_with_logits(disc_output.squeeze(), 1-batch_mask).mean()
 
                 # loss_pre
-                pre_tmp = imputed.squeeze() * batch_mask
-                target_pre = batch_mask * batch_data
+                pre_tmp = impute.squeeze() * batch_mask
+                target_pre = batch_data * batch_mask
                 loss_pre = nn.MSELoss()(pre_tmp, target_pre)
 
                 # loss_re
@@ -207,7 +212,7 @@ def run(config):
 
                 if i % config.T_update_F == 0:
                     # F_update
-                    imputed, disc_output, latent, reconstructed = m(data)
+                    disc_output, impute, latent, reconstructed = m(data)
                     U, s, V = torch.linalg.svd(latent)
                     F_new = U.T[:config.k_cluster, :]
                     F_new = F_new.T
@@ -220,6 +225,10 @@ def run(config):
             H_outputs = []
             for batch_data, batch_mask in get_batch(test_data, test_mask, config):
                 data = {}
+
+                batch_data = torch.reshape(batch_data, (config.batch_size, config.seq_len, config.input_dim))
+                batch_mask = torch.reshape(batch_mask, (config.batch_size, config.seq_len, config.input_dim))
+
                 data['values'] = batch_data
                 data['masks'] = batch_mask
                 imputed, disc_output, latent, reconstructed = m(data)
@@ -241,10 +250,20 @@ def run(config):
             ACC.append(acc)
             PUR.append(pur)
 
-    ri = max(RI[80], RI[300], RI[500])
-    nmi = max(NMI[80], NMI[300], NMI[500])
-    acc = max(ACC[80], ACC[300], ACC[500])
-    pur = max(PUR[80], PUR[300], PUR[500])
+    # ri = max(RI[80-1], RI[300-1], RI[500-1])
+    # nmi = max(NMI[80-1], NMI[300-1], NMI[500-1])
+    # acc = max(ACC[80-1], ACC[300-1], ACC[500-1])
+    # pur = max(PUR[80-1], PUR[300-1], PUR[500-1])
+
+    # ri = max(RI[80-1], RI[300-1], RI[500-1])
+    # nmi = max(NMI[80-1], NMI[300-1], NMI[500-1])
+    # acc = max(ACC[80-1], ACC[300-1], ACC[500-1])
+    # pur = max(PUR[80-1], PUR[300-1], PUR[500-1])
+
+    ri = max(RI)
+    nmi = max(NMI)
+    acc = max(ACC)
+    pur = max(PUR)
 
     return ri, nmi, pur, acc
 
@@ -257,17 +276,19 @@ if __name__ == '__main__':
     parser.add_argument('--G_steps', type=int, required=False, default=1)
     parser.add_argument('--D_steps', type=int, required=False, default=1)
     parser.add_argument('--epoch', type=int, required=False, default=500)
-    parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
-    parser.add_argument('--dataset_name', type=str, required=False, default='HouseVote')  # BloodSample
-    parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
-    parser.add_argument('--G_hiddensize', type=int, required=False, default=16)
-    parser.add_argument('--G_layer', type=int, required=False, default=1)
+    # parser.add_argument('--G_layer', type=int, required=False, default=1)
     parser.add_argument('--IsD', type=bool, required=False, default=False)
     parser.add_argument('--cell_type', type=str, required=False, default='gru')
     parser.add_argument('--data_dir', type=str, required=False, default='dataset')
-    parser.add_argument('--seq_len', type=int, required=False, default=16)
     parser.add_argument('--gpu_num', type=int, required=False, default=0)
-    parser.add_argument('--input_dim', type=int, required=False, default=1)
+
+    parser.add_argument('--seq_len', type=int, required=False, default=20)
+    parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
+    parser.add_argument('--dataset_name', type=str, required=False, default='HouseVote')  # BloodSample
+    parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
+    parser.add_argument('--G_hiddensize', type=int, required=False, default=20*10)
+    parser.add_argument('--input_dim', type=int, required=False, default=10)
+    parser.add_argument('--latent_dim', type=int, required=False, default=20*10)
 
     config = parser.parse_args()
 

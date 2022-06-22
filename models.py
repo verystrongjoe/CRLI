@@ -5,28 +5,26 @@ import argparse
 
 
 class Generator(nn.Module):
-    def __init__(self, config, input_dim=1):
+    def __init__(self, config):
         super(Generator, self).__init__()
         self.config = config
         self.rnn_hid_size = config.G_hiddensize
         self.seq_len = self.config.seq_len
-        self.input_dim = input_dim
+        self.input_dim = self.config.input_dim
         self.device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
 
-        self.fwd_rnn_cell = nn.LSTMCell(input_dim, self.rnn_hid_size).to(self.device)
-        self.bwd_rnn_cell = nn.LSTMCell(input_dim, self.rnn_hid_size).to(self.device)
+        self.fwd_rnn_cell = nn.LSTMCell(self.input_dim, self.rnn_hid_size).to(self.device)
+        self.bwd_rnn_cell = nn.LSTMCell(self.input_dim, self.rnn_hid_size).to(self.device)
         self.impute_reg = nn.Linear(self.rnn_hid_size, self.input_dim).to(self.device)
         # self.out = nn.Linear(self.rnn_hid_size, self.input_dim).to(self.device)
 
     def forward(self, data):
         fwd_values = data['values']
         fwd_masks = data['masks']
-
-        fwd_values = torch.unsqueeze(fwd_values, -1)
-        fwd_masks = torch.unsqueeze(fwd_masks, -1)
         batch_size = fwd_values.size()[0]
 
-        assert fwd_values.shape == (batch_size, self.config.seq_len, 1)
+        assert fwd_values.shape == (batch_size, self.config.seq_len, self.input_dim)
+        assert fwd_masks.shape == (batch_size, self.config.seq_len, self.input_dim)
 
         bwd_values = torch.flip(fwd_values, (2,))
         bwd_masks = torch.flip(fwd_masks, (2,))
@@ -61,12 +59,12 @@ class Generator(nn.Module):
             x_imputed_fwd = self.impute_reg(h_fwd)
             x_imputed_bwd = self.impute_reg(h_bwd)
 
-            c_c_fwd = (1-m_fwd) * x_fwd + m_fwd * x_imputed_fwd
-            c_c_bwd = (1-m_bwd) * x_bwd + m_bwd * x_imputed_bwd
+            c_c_fwd = (1-m_fwd) * x_imputed_fwd + m_fwd * x_fwd
+            c_c_bwd = (1-m_bwd) * x_imputed_bwd + m_bwd * x_bwd
 
             h_fwd, c_fwd = self.fwd_rnn_cell(c_c_fwd, (h_fwd, c_fwd))
             h_bwd, c_bwd = self.bwd_rnn_cell(c_c_bwd, (h_bwd, c_bwd))
-            h = h_fwd + h_bwd
+            h = (h_fwd + h_bwd)/2
 
             if t == (self.seq_len - 1):
                 imputations.append(h)
@@ -75,21 +73,22 @@ class Generator(nn.Module):
 
         # 원래 논문에는 1이 존재하는 데이터 0이 missing data임을 감안
 
-        return h, imputations * (1 - fwd_masks) + fwd_values *  fwd_masks
+        return h, imputations, imputations * (1 - fwd_masks) + fwd_values * fwd_masks
 
 
 class Decoder(nn.Module):
-    def __init__(self, config,  latent_dim, rnn_hid_size, output_dim, input_dim=1):
+    def __init__(self, config,  latent_dim, rnn_hid_size, output_dim):
         super(Decoder, self).__init__()
         self.config = config
         self.latent_dim = latent_dim
+
         self.device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
 
         self.rnn_cell = nn.LSTMCell(latent_dim, rnn_hid_size).to(self.device)
         self.rnn_output = nn.Linear(rnn_hid_size, output_dim).to(self.device)
 
         self.rnn_hid_size = rnn_hid_size
-        self.input_dim = input_dim
+        self.input_dim = self.config.input_dim
         self.seq_len = config.seq_len
 
     def forward(self, x):  # bi-rnn -> forward states + backward states
@@ -100,7 +99,7 @@ class Decoder(nn.Module):
         start_value = start_value.to(self.device)
 
         h = Variable(torch.zeros((batch_size, self.rnn_hid_size))).to(self.device)  # (B, H)
-        c = Variable(torch.zeros((batch_size, self.rnn_hid_size))) .to(self.device) # (B, H)
+        c = Variable(torch.zeros((batch_size, self.rnn_hid_size))).to(self.device) # (B, H)
 
         if torch.cuda.is_available():
             h, c = h.cuda(), c.cuda()
@@ -115,14 +114,15 @@ class Decoder(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, config, input_dim=1):
+    def __init__(self, config):
         super(Discriminator, self).__init__()
         self.config = config
+
         self.device = torch.device(f'cuda:{self.config.gpu_num}' if torch.cuda.is_available() else 'cpu')
-        self.output_layer = nn.Linear(32, input_dim).to(self.device)
+        self.output_layer = nn.Linear(32, self.config.input_dim).to(self.device)
         self.disc_cells = nn.ModuleList(
             [nn.LSTMCell(input_size=i, hidden_size=h)for (i, h) in
-             zip([input_dim, 32, 16, 8, 16], [32, 16, 8, 16, 32])
+             zip([self.config.input_dim, 32, 16, 8, 16], [32, 16, 8, 16, 32])
              ])
         self.disc_cells.to(self.device)
 
@@ -166,11 +166,12 @@ class CRLI(nn.Module):
         self.F = torch.autograd.Variable(f, requires_grad=False).to(self.device)
 
     def forward(self, x):
-        h, imputed = self.generator(x)
+        h, impute, imputed = self.generator(x)
         disc_output = self.discriminator(imputed)
         latent = self.fully_connected(h)
         reconstructed = self.decoder(latent)
-        return imputed, disc_output, latent, reconstructed
+        return disc_output, impute, latent, reconstructed
+
 
     def update_F(self, F_new):
         #  assign a new value to a pytorch Variable without breaking backpropagation!!
@@ -197,4 +198,4 @@ if __name__ == '__main__':
 
     config = parser.parse_args()
 
-    m = CRLI()
+    m = CRLI(config)
