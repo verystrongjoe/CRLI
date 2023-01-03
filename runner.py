@@ -1,119 +1,20 @@
+"""
+written by Uk Jo
+
+# [paper] https://www.aaai.org/AAAI21Papers/AAAI-2808.MaQ.pdf
+# [appendix] https://github.com/qianlima-lab/CRLI/blob/main/appendix.pdf
+"""
 import torch
-from sklearn import metrics
-import pandas as pd
 import warnings
-import argparse
+warnings.filterwarnings("ignore")
+
 import numpy as np
 from sklearn.cluster import KMeans
 import torch.nn as nn
-from scipy.optimize import linear_sum_assignment
+from commons import assess, load_mask, load_data, get_batch, get_args
 from models import CRLI
 import torch.nn.functional as F
 import wandb
-
-warnings.filterwarnings("ignore")
-parser = argparse.ArgumentParser()
-
-
-def pur_metric(pred, target):
-    n = len(pred)
-    tmp = pd.crosstab(pred, target)
-    tmp = np.array(tmp)
-    ret = np.max(tmp, 1)
-    ret = float(np.sum(ret))
-    ret = ret / n
-    return ret
-
-
-def nmi_metric(pred, target):
-    NMI = metrics.normalized_mutual_info_score(pred, target)
-    return NMI
-
-
-def RI_metric(pred, target):
-    # RI
-    n = len(target)
-    TP = 0
-    TN = 0
-    for i in range(n - 1):
-        for j in range(i + 1, n):
-            if target[i] != target[j]:
-                if pred[i] != pred[j]:
-                    TN += 1
-            else:
-                if pred[i] == pred[j]:
-                    TP += 1
-
-    RI = n * (n - 1) / 2
-    RI = (TP + TN) / RI
-    return RI
-
-
-def _accuracy(y_pred, y_true):
-    def cluster_acc(Y_pred, Y):
-        assert Y_pred.size == Y.size
-        D = max(Y_pred.max(), Y.max()) + 1
-        w = np.zeros((D, D), dtype=np.int32)
-        for i in range(Y_pred.size):
-            w[Y_pred[i], Y[i]] += 1
-        ind = linear_sum_assignment(w.max() - w)
-        return sum([w[i, j] for i, j in ind]) * 1.0 / Y_pred.size, np.array(w)
-    y_pred = np.array(y_pred, np.int32)
-    y_true = np.array(y_true, np.int32)
-    return cluster_acc(y_pred, y_true)
-
-
-def assess(pred, target):
-    pur = pur_metric(pred, target)
-    nmi = nmi_metric(pred, target)
-    ri = RI_metric(pred, target)
-    acc, o = _accuracy(pred, target)
-    return ri, nmi, acc, pur
-
-
-def load_mask(filename):
-    mask_label = np.loadtxt(filename, delimiter = ",")
-    mask = mask_label[:,1:].astype(np.float32)
-    return mask
-
-
-def load_data(filename):
-    data_label = np.loadtxt(filename, delimiter = ",")
-    data = data_label[:,1:].astype(np.float32)
-    label = data_label[:,0].astype(np.int32)
-    return data,label
-
-
-def load_length(filename):
-    length = np.loadtxt(filename, delimiter = ",")
-    return length
-
-
-def load_lengthmark(filename):
-    lengthmark = np.loadtxt(filename,delimiter = ",")
-    return lengthmark
-
-
-def get_batch(data, mask, config):
-    samples_num = data.shape[0]
-    batch_num = int(samples_num / config.batch_size)
-    left_row = samples_num - batch_num * config.batch_size
-    device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
-
-    data = torch.from_numpy(data).to(device)
-    mask = torch.Tensor(mask).to(device)
-
-    for i in range(batch_num):
-        batch_data = data[i * config.batch_size: (i + 1) * config.batch_size, :]
-        batch_mask = mask[i * config.batch_size: (i + 1) * config.batch_size, :]
-        yield (batch_data, batch_mask)
-
-    if left_row != 0:
-        need_more = config.batch_size - left_row
-        need_more = np.random.choice(np.arange(samples_num), size=need_more)
-        batch_data = torch.concat((data[-left_row:, :], data[need_more,:]), axis=0)
-        batch_mask = torch.concat((mask[-left_row:, :], mask[need_more,:]), axis=0)
-        yield (batch_data, batch_mask)
 
 
 def run(config):
@@ -144,6 +45,7 @@ def run(config):
     GLOBAL_STEP = -1
 
     m = CRLI(config)
+    m.to(torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu'))
 
     gen_params = []
     disc_params = []
@@ -163,6 +65,7 @@ def run(config):
         ####################################################################################################
         D_Step_losses = []
         G_Step_losses = []
+
         G_losses = []
         re_losses = []
         pre_losses = []
@@ -190,7 +93,7 @@ def run(config):
             for j in range(config.G_steps):
                 # run generator
                 disc_output, impute, latent, reconstructed = m(data)
-                loss_G = F.binary_cross_entropy_with_logits(disc_output, 1-batch_mask).mean()
+                loss_adv = F.binary_cross_entropy_with_logits(disc_output, 1-batch_mask)
 
                 # loss_pre
                 pre_tmp = impute * batch_mask
@@ -208,15 +111,14 @@ def run(config):
                 loss_km = torch.trace(HTH) - torch.trace(FTHTHF)
 
                 gen_optimizer.zero_grad()
-                (loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
+                (loss_adv + loss_pre + loss_re + loss_km * config.lambda_kmeans).backward()
                 gen_optimizer.step()
 
-
-                G_Step_losses.append((loss_G + loss_pre + loss_re + loss_km * config.lambda_kmeans).item())
+                G_Step_losses.append((loss_adv + loss_pre + loss_re + loss_km * config.lambda_kmeans).item())
                 km_losses.append(loss_km.item())
                 pre_losses.append(loss_pre.item())
                 re_losses.append(loss_pre.item())
-                G_losses.append(loss_G.item())
+                G_losses.append(loss_adv.item())
 
                 if i % config.T_update_F == 0:
                     # F_update
@@ -245,18 +147,16 @@ def run(config):
             Km = KMeans(n_clusters=config.k_cluster)
             pred_H = Km.fit_predict(H_outputs.cpu().detach().numpy())
 
-            ####################################################################################################
             # ASSESMENT
-            ####################################################################################################
-            ri,nmi,acc,pur = assess(pred_H,test_label)
-            print(f'epoch : {i}, acc : {acc}, ri: {ri}')
+            ri,nmi,acc,pur = assess(pred_H, test_label)
+            print(f'nm_dataset : {config.dataset_name}, epoch : {i}, acc : {acc}, ri: {ri}')
 
             ## wandb logging
             wandb.log({'accuracy' : acc})
             wandb.log({'ri': ri})
             wandb.log({'D_step loss': np.mean(D_Step_losses)})
             wandb.log({'G_step loss': np.mean(G_Step_losses)})
-            wandb.log({'loss_G': np.mean(G_losses)})
+            wandb.log({'loss_adv': np.mean(G_losses)})
             wandb.log({'loss_pre': np.mean(pre_losses)})
             wandb.log({'loss_re': np.mean(re_losses)})
             wandb.log({'loss_km': np.mean(km_losses)})
@@ -266,6 +166,7 @@ def run(config):
             ACC.append(acc)
             PUR.append(pur)
 
+    # It is based on tensorflow code.
     # ri = max(RI[80-1], RI[300-1], RI[500-1])
     # nmi = max(NMI[80-1], NMI[300-1], NMI[500-1])
     # acc = max(ACC[80-1], ACC[300-1], ACC[500-1])
@@ -276,6 +177,7 @@ def run(config):
     # acc = max(ACC[80-1], ACC[300-1], ACC[500-1])
     # pur = max(PUR[80-1], PUR[300-1], PUR[500-1])
 
+    # For now, I ignore this evaluation method and just pick best result in every epochs.
     ri = max(RI)
     nmi = max(NMI)
     acc = max(ACC)
@@ -285,38 +187,30 @@ def run(config):
 
 
 if __name__ == '__main__':
+    config = get_args()
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, required=False, default=32)
-    parser.add_argument('--T_update_F', type=int, required=False, default=1)
-    parser.add_argument('--G_steps', type=int, required=False, default=1)
-    parser.add_argument('--D_steps', type=int, required=False, default=1)
-    parser.add_argument('--epoch', type=int, required=False, default=500)
-    # parser.add_argument('--G_layer', type=int, required=False, default=1)
-    parser.add_argument('--IsD', type=bool, required=False, default=False)
-    parser.add_argument('--cell_type', type=str, required=False, default='gru')
-    parser.add_argument('--data_dir', type=str, required=False, default='dataset')
-    parser.add_argument('--gpu_num', type=int, required=False, default=0)
+    # model hyperparams and the value follows this paper.
+    list_g_layers = [1, 2, 3]
+    list_lambda_kmeans = [1e-3, 1e-6, 1e-9]
+    list_G_steps = [2, 3, 4]
 
-    parser.add_argument('--seq_len', type=int, required=False, default=16)
-    parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
-    parser.add_argument('--dataset_name', type=str, required=False, default='HouseVote')  # BloodSample
-    parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
-    parser.add_argument('--input_dim', type=int, required=False, default=1)
-
-    parser.add_argument('--G_hiddensize', type=int, required=False, default=20*10)
-    parser.add_argument('--latent_dim', type=int, required=False, default=20*10)
-
-    config = parser.parse_args()
-
-    # update config
-    config.latent_dim = config.seq_len * config.input_dim
-    config.G_hiddensize = config.seq_len * config.input_dim
-
-    wandb.init(config=config, project=f'crli_{config.dataset_name}')
-    wandb.config.update(config)
-    wandb_metric_table = wandb.Table(columns=['ri', 'nmi', 'pur', 'cluster_acc'])
-    ri, nmi, pur, cluster_acc = run(config)
-    wandb_metric_table.add_data(ri, nmi, pur, cluster_acc)
-
-    print('%s,%.6f,%.6f,%.6f,%.6f' % (config.dataset_name, ri, nmi, pur, cluster_acc))
+    for nm_dataset in config.datasets:
+        for g_layer in list_g_layers:
+            for lambda_kmeans in list_lambda_kmeans:
+                for G_steps in list_G_steps:
+                    config.dataset_name = nm_dataset
+                    config.seq_len = config.datasets[nm_dataset]["seq_len"]
+                    config.input_dim = config.datasets[nm_dataset]["input_dim"]
+                    config.G_hiddensize = config.seq_len * config.input_dim  # todo : Hidden 사이즈 여러개 실험 50, 100, 150
+                    config.G_layer = g_layer
+                    config.lambda_kmeans = lambda_kmeans
+                    config.G_steps = G_steps
+                    experiment_name = f"lambda_{lambda_kmeans}_l_{g_layer}_g_{G_steps}"
+                    wandb.init(config=config, project=f'crli_{nm_dataset}_300', name=experiment_name)
+                    wandb.config.update(config, allow_val_change=True)
+                    wandb_metric_table = wandb.Table(columns=['nm_dataset', 'ri', 'nmi', 'pur', 'cluster_acc'])
+                    ri, nmi, pur, cluster_acc = run(config)
+                    wandb_metric_table.add_data(nm_dataset, ri, nmi, pur, cluster_acc)
+                    wandb.log("metrics", wandb_metric_table)
+                    wandb.finish()
+                    print('dataset name : %s,  ri : %.6f, nmi : %.6f, pur : %.6f, accuracy : %.6f' % (config.dataset_name, ri, nmi, pur, cluster_acc))

@@ -96,25 +96,29 @@ def build_model(config,sess):
     
     
     with tf.variable_scope('generator'):
-        begin_value = tf.ones([config.batch_size,1],dtype=tf.float32) * -128
-        end_value = tf.ones([config.batch_size,1],dtype=tf.float32) * 128
+        begin_value = tf.ones([config.batch_size, 1], dtype=tf.float32) * -128
+        end_value = tf.ones([config.batch_size, 1], dtype=tf.float32) * 128
         
-        begin_value = tf.Variable(begin_value,trainable = False)
-        end_value = tf.Variable(end_value,trainable = False)
+        begin_value = tf.Variable(begin_value, trainable = False)
+        end_value = tf.Variable(end_value, trainable = False)
         
         begin_identifier = tf.layers.dense(begin_value,config.inputdims)
         end_identifier = tf.layers.dense(end_value,config.inputdims)
         
         with tf.variable_scope('fw_generator'):
+
             fw_muticell = tf.contrib.rnn.MultiRNNCell( [Rnn_cell(config.G_hiddensize,config.cell_type) for _ in range(config.G_layer)])
-            def fw_initial_fn():            
+
+            def fw_initial_fn():
                 initial_elements_finished = (0 >= seq_length)  # all False at the initial step             
                 initial_input = begin_identifier            
                 return initial_elements_finished, initial_input
             useless_ids = tf.constant(value = 0,dtype = tf.int32,shape = [config.batch_size,])
-            def fw_sample_fn(time, outputs, state):                   
+
+            def fw_sample_fn(time, outputs, state):
                 return useless_ids
-            def fw_next_inputs_fn(time, outputs, state, sample_ids):       
+
+            def fw_next_inputs_fn(time, outputs, state, sample_ids):
                 del sample_ids
                 elements_finished = (time >= seq_length)    
                 idx = time-1 
@@ -126,7 +130,9 @@ def build_model(config,sess):
             fw_helper = CustomHelper(fw_initial_fn,fw_sample_fn,fw_next_inputs_fn)
             fw_initial_state = fw_muticell.zero_state(config.batch_size,dtype = tf.float32)
             fw_decoder = BasicDecoder(fw_muticell,fw_helper,fw_initial_state,fw_dense_layer)
-            fw_outputs,fw_states,_ = dynamic_decode(fw_decoder,
+
+            # return final_outputs, final_state, final_sequence_lengths
+            fw_outputs, fw_states, _ = dynamic_decode(fw_decoder,
                        output_time_major=False,
                        impute_finished=True,
                        swap_memory=True,
@@ -137,8 +143,8 @@ def build_model(config,sess):
             fw_generator_outputs = tf.concat([fw_generator_outputs,zero_padding],1)
             fw_gen_trim = fw_generator_outputs[:,:-1,:]
             fw_gen_trim_reshaped = tf.reshape(fw_gen_trim,[config.batch_size,config.n_steps,config.inputdims])
+
         with tf.variable_scope('bw_generator'):
-            
             bw_inputs = tf.reverse_sequence(
                                     corpt_inputs,
                                     seq_length,
@@ -149,17 +155,19 @@ def build_model(config,sess):
                                     seq_length,
                                     seq_axis=1,
                                     batch_axis=0)
-            
-            
+
             bw_muticell = tf.contrib.rnn.MultiRNNCell( [Rnn_cell(config.G_hiddensize,config.cell_type) for _ in range(config.G_layer)] )
-            def bw_initial_fn():            
+
+            def bw_initial_fn():
                 initial_elements_finished = (0 >= seq_length)  # all False at the initial step             
                 initial_input = end_identifier            
                 return initial_elements_finished, initial_input
             useless_ids = tf.constant(value = 0,dtype = tf.int32,shape = [config.batch_size,])
-            def bw_sample_fn(time, outputs, state):                   
+
+            def bw_sample_fn(time, outputs, state):
                 return useless_ids
-            def bw_next_inputs_fn(time, outputs, state, sample_ids):       
+
+            def bw_next_inputs_fn(time, outputs, state, sample_ids):
                 del sample_ids
                 elements_finished = (time >= seq_length)    
                 idx = time-1 
@@ -169,7 +177,7 @@ def build_model(config,sess):
             
             bw_dense_layer = layers.Dense(config.inputdims)
             bw_helper = CustomHelper(bw_initial_fn,bw_sample_fn,bw_next_inputs_fn)
-            bw_initial_state = bw_muticell.zero_state(config.batch_size,dtype = tf.float32)
+            bw_initial_state = bw_muticell.zero_state(config.batch_size,dtype=tf.float32)
             bw_decoder = BasicDecoder(bw_muticell,bw_helper,bw_initial_state,bw_dense_layer)
             bw_outputs,bw_states,_ = dynamic_decode(bw_decoder,
                        output_time_major=False,
@@ -185,10 +193,9 @@ def build_model(config,sess):
                                     seq_length,
                                     seq_axis=1,
                                     batch_axis=0)
-            bw_gen_trim_reshaped = tf.reshape(bw_gen_trim_revesed,[config.batch_size,config.n_steps,config.inputdims])
+            bw_gen_trim_reshaped = tf.reshape(bw_gen_trim_revesed, [config.batch_size, config.n_steps, config.inputdims])
         
         impute_vector = (fw_gen_trim_reshaped + bw_gen_trim_reshaped)/2
-        
         imputed_vector = tf.multiply(corpt_inputs,masks) + tf.multiply(impute_vector,1-masks)
         
     with tf.variable_scope('discriminator'):
@@ -246,21 +253,25 @@ def build_model(config,sess):
         #loss_D
         loss_D = tf.nn.sigmoid_cross_entropy_with_logits(logits = disc_reshaped,labels = mask_inputs)
         loss_D = tf.multiply(loss_D,length_mark)
-        loss_D = tf.reduce_sum(tf.reduce_mean(loss_D,0))
+        loss_D = tf.reduce_sum(tf.reduce_mean(loss_D, 0))
+
         #loss_G
         loss_G = tf.nn.sigmoid_cross_entropy_with_logits(logits = disc_reshaped,labels = 1-mask_inputs)
         loss_G = tf.multiply(loss_G,length_mark)
         loss_G = tf.multiply(loss_G,1-mask_inputs)
-        loss_G = tf.reduce_sum(tf.reduce_mean(loss_G,0))
+        loss_G = tf.reduce_sum(tf.reduce_mean(loss_G, 0))
+
         #loss_pre
-        pre_tmp = tf.multiply(impute_vector,masks)
-        targ_pre = tf.multiply(masks,corpt_inputs)
+        pre_tmp = tf.multiply(impute_vector, masks)
+        targ_pre = tf.multiply(masks, corpt_inputs)
         loss_pre = mse_error(pre_tmp,targ_pre) 
+
         #loss_re
         output_trim = decoder_outputs[:,:-1,:]
         out_tmp = tf.multiply(output_trim,masks)
         targ_re = tf.multiply(corpt_inputs,masks)
         loss_re = mse_error(out_tmp,targ_re)
+
         #loss_km
         HTH = tf.matmul(latent_rep,tf.transpose(latent_rep))
         F_copy = tf.get_variable('F', shape=[config.batch_size, config.k_cluster],
@@ -285,7 +296,7 @@ def build_model(config,sess):
             
     with tf.name_scope("train_op"):
         D_loss_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='discriminator')
-        train_disc = tf.train.AdamOptimizer(config.learning_rate).minimize(loss_disc,var_list = D_loss_vars)
+        train_disc = tf.train.AdamOptimizer(config.learning_rate).minimize(loss_disc, var_list=D_loss_vars)
         train_gen = tf.train.AdamOptimizer(config.learning_rate).minimize(loss_gen)
     
     
@@ -457,7 +468,6 @@ if __name__ == "__main__":
     parser.add_argument('--G_layer',type=int,required=False,default=1)
     parser.add_argument('--IsD',type=bool,required=False,default=False)
     parser.add_argument('--cell_type',type=str,required=False,default='gru')
-    
     
     config = parser.parse_args()
     

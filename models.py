@@ -13,9 +13,28 @@ class Generator(nn.Module):
         self.input_dim = self.config.input_dim
         self.device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
 
-        self.fwd_rnn_cell = nn.LSTMCell(self.input_dim, self.rnn_hid_size).to(self.device)
-        self.bwd_rnn_cell = nn.LSTMCell(self.input_dim, self.rnn_hid_size).to(self.device)
-        self.impute_reg = nn.Linear(self.rnn_hid_size, self.input_dim).to(self.device)
+        # https://towardsdatascience.com/from-a-lstm-cell-to-a-multilayer-lstm-network-with-pytorch-2899eb5696f3
+        self.fwd_rnn_cell = nn.ModuleList(
+             [
+                nn.LSTMCell((self.input_dim if layer==0 else self.rnn_hid_size), self.rnn_hid_size)
+                for layer in range(config.G_layer)
+             ]
+        )
+
+        self.bwd_rnn_cell = nn.ModuleList(
+             [
+                nn.LSTMCell((self.input_dim if layer==0 else self.rnn_hid_size), self.rnn_hid_size)
+                for layer in range(config.G_layer)
+             ]
+        )
+
+        # self.fwd_rnn_cell = nn.LSTMCell(self.input_dim, self.rnn_hid_size)
+        # self.bwd_rnn_cell = nn.LSTMCell(self.input_dim, self.rnn_hid_size)
+
+        self.fc_begin_value = nn.Linear(1, self.input_dim)
+        self.fc_end_value = nn.Linear(1, self.input_dim)
+
+        self.out = nn.Linear(self.rnn_hid_size, self.input_dim)
         # self.out = nn.Linear(self.rnn_hid_size, self.input_dim).to(self.device)
 
     def forward(self, data):
@@ -26,27 +45,35 @@ class Generator(nn.Module):
         assert fwd_values.shape == (batch_size, self.config.seq_len, self.input_dim)
         assert fwd_masks.shape == (batch_size, self.config.seq_len, self.input_dim)
 
-        bwd_values = torch.flip(fwd_values, (2,))
-        bwd_masks = torch.flip(fwd_masks, (2,))
+        bwd_values = torch.flip(fwd_values, (1,))
+        bwd_masks = torch.flip(fwd_masks, (1,))
 
-        fwd_start_value = Variable(torch.ones(batch_size, self.input_dim), requires_grad=False) * 128
-        bwd_start_value = Variable(torch.ones(batch_size, self.input_dim), requires_grad=False) * -128
-        fwd_start_value = fwd_start_value.to(self.device)
-        bwd_start_value = bwd_start_value.to(self.device)
+        fwd_start_value = Variable(torch.ones(batch_size, 1), requires_grad=False).to(self.device) * 128
+        bwd_start_value = Variable(torch.ones(batch_size, 1), requires_grad=False).to(self.device) * -128
 
-        h_fwd = Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size)))  # (B, H)
-        c_fwd = Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size)))  # (B, H)
+        fwd_start = self.fc_begin_value(fwd_start_value)
+        bwd_start = self.fc_end_value(bwd_start_value)
 
-        h_bwd = Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size)))  # (B, H)
-        c_bwd = Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size)))  # (B, H)
+        h_fwds, c_fwds = [], []
+        h_bwds, c_bwds = [], []
 
-        if torch.cuda.is_available():
-            h_fwd, c_fwd, h_bwd, c_bwd = h_fwd.cuda(), c_fwd.cuda(), h_bwd.cuda(), c_bwd.cuda()
+        for layer in range(self.config.G_layer):
+            h_fwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))   # (B, H)
+            c_fwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))  # (B, H)
+
+            h_bwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))   # (B, H)
+            c_bwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))  # (B, H)
 
         # append first identifier to data (B, T, 1)
         # for the first time, we set first value as for equation(5).
-        h_fwd, c_fwd = self.fwd_rnn_cell(fwd_start_value, (h_fwd, c_fwd))
-        h_bwd, c_bwd = self.bwd_rnn_cell(bwd_start_value, (h_bwd, c_bwd))
+        for layer in range(1, self.config.G_layer):
+            if layer == 0:
+                h_fwds[layer], c_fwds[layer] = self.fwd_rnn_cell[layer](fwd_start, (h_fwds[layer], c_fwds[layer]))
+                h_bwds[layer], c_bwds[layer] = self.bwd_rnn_cell[layer](bwd_start, (h_bwds[layer], c_bwds[layer]))
+            else:
+                h_fwds[layer], c_fwds[layer] = self.fwd_rnn_cell[layer](h_fwds[layer-1], (h_fwds[layer], c_fwds[layer]))
+                h_bwds[layer], c_bwds[layer] = self.bwd_rnn_cell[layer](h_bwds[layer-1], (h_bwds[layer], c_bwds[layer]))
+
         imputations = []
 
         for t in range(self.seq_len):
@@ -56,15 +83,23 @@ class Generator(nn.Module):
             x_bwd = bwd_values[:, t, :]
             m_bwd = bwd_masks[:, t, :]
 
-            x_imputed_fwd = self.impute_reg(h_fwd)
-            x_imputed_bwd = self.impute_reg(h_bwd)
+            x_imputed_fwd = self.out(h_fwds[self.config.G_layer-1])
+            x_imputed_bwd = self.out(h_bwds[self.config.G_layer-1])
 
             c_c_fwd = (1-m_fwd) * x_imputed_fwd + m_fwd * x_fwd
             c_c_bwd = (1-m_bwd) * x_imputed_bwd + m_bwd * x_bwd
 
-            h_fwd, c_fwd = self.fwd_rnn_cell(c_c_fwd, (h_fwd, c_fwd))
-            h_bwd, c_bwd = self.bwd_rnn_cell(c_c_bwd, (h_bwd, c_bwd))
-            h = (h_fwd + h_bwd)/2
+            for layer in range(self.config.G_layer):
+                if layer == 0:
+                    h_fwds[layer], c_fwds[layer] = self.fwd_rnn_cell[layer](c_c_fwd, (h_fwds[layer], c_fwds[layer]))
+                    h_bwds[layer], c_bwds[layer] = self.bwd_rnn_cell[layer](c_c_bwd, (h_bwds[layer], c_bwds[layer]))
+                else:
+                    h_fwds[layer], c_fwds[layer] = self.fwd_rnn_cell[layer](h_fwds[layer - 1], (h_fwds[layer], c_fwds[layer]))
+                    h_bwds[layer], c_bwds[layer] = self.bwd_rnn_cell[layer](h_bwds[layer - 1], (h_bwds[layer], c_bwds[layer]))
+
+            h = (h_fwds[self.config.G_layer-1] +
+                 torch.flip(h_bwds[self.config.G_layer-1], (1,))
+                 )/2
 
             if t == (self.seq_len - 1):
                 imputations.append(h)
@@ -77,15 +112,13 @@ class Generator(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, config,  latent_dim, rnn_hid_size, output_dim):
+    def __init__(self, config,  rnn_hid_size, output_dim):
         super(Decoder, self).__init__()
         self.config = config
-        self.latent_dim = latent_dim
+        self.latent_dim = rnn_hid_size
 
-        self.device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
-
-        self.rnn_cell = nn.LSTMCell(latent_dim, rnn_hid_size).to(self.device)
-        self.rnn_output = nn.Linear(rnn_hid_size, output_dim).to(self.device)
+        self.rnn_cell = nn.LSTMCell(rnn_hid_size, rnn_hid_size)
+        self.rnn_output = nn.Linear(rnn_hid_size, output_dim)
 
         self.rnn_hid_size = rnn_hid_size
         self.input_dim = self.config.input_dim
@@ -95,11 +128,11 @@ class Decoder(nn.Module):
         batch_size = x.size()[0]
 
         # todo : 여기 start value를 어떻게 정의해야하나?
-        start_value = Variable(torch.ones(batch_size, self.latent_dim), requires_grad=False) * 128
-        start_value = start_value.to(self.device)
+        start_value = Variable(torch.ones(batch_size, self.rnn_hid_size), requires_grad=False) * 128
+        start_value = start_value
 
-        h = Variable(torch.zeros((batch_size, self.rnn_hid_size))).to(self.device)  # (B, H)
-        c = Variable(torch.zeros((batch_size, self.rnn_hid_size))).to(self.device) # (B, H)
+        h = Variable(torch.zeros((batch_size, self.rnn_hid_size))) # (B, H)
+        c = Variable(torch.zeros((batch_size, self.rnn_hid_size))) # (B, H)
 
         if torch.cuda.is_available():
             h, c = h.cuda(), c.cuda()
@@ -118,13 +151,11 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         self.config = config
 
-        self.device = torch.device(f'cuda:{self.config.gpu_num}' if torch.cuda.is_available() else 'cpu')
-        self.output_layer = nn.Linear(32, self.config.input_dim).to(self.device)
+        self.output_layer = nn.Linear(32, self.config.input_dim)
         self.disc_cells = nn.ModuleList(
             [nn.LSTMCell(input_size=i, hidden_size=h)for (i, h) in
              zip([self.config.input_dim, 32, 16, 8, 16], [32, 16, 8, 16, 32])
              ])
-        self.disc_cells.to(self.device)
 
     def forward(self, x):
         outputs = []
@@ -143,12 +174,11 @@ class Discriminator(nn.Module):
 class CRLI(nn.Module):
     def __init__(self, config):
         rnn_hid_size = config.G_hiddensize
-        latent_dim = config.latent_dim
+        latent_dim = config.G_hiddensize
         output_dim = config.input_dim
 
         super(CRLI, self).__init__()
         self.config = config
-        self.device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
 
         # start branch
         self.generator = Generator(config=config)
@@ -157,13 +187,16 @@ class CRLI(nn.Module):
         self.discriminator = Discriminator(self.config)
 
         # lower branch
-        self.fully_connected = nn.Linear(rnn_hid_size, latent_dim).to(self.device)
-        self.decoder = Decoder(config, latent_dim, rnn_hid_size, output_dim).to(self.device)
+        self.fully_connected = nn.Linear(rnn_hid_size, latent_dim)
+        self.decoder = Decoder(config, rnn_hid_size, output_dim)
 
-        ## third
+        # spectral relaxation for k-means clustering
+        # F is a cluster indicator matrix with shape of N x k (k is number of cluster in this dataset)
+        # learning of H is dynamic instead of static ->  learning is done iteratively.
+        # Ky fan theorem, F can be obtained by computing the k-truncated singular value decomposition of H
         f = torch.empty(config.batch_size, config.k_cluster, dtype=torch.float32)
-        torch.nn.init.orthogonal_(f, gain=1)
-        self.F = torch.autograd.Variable(f, requires_grad=False).to(self.device)
+        torch.nn.init.orthogonal_(f, gain=1)  # by equation 9  F^TxF = I
+        self.F = torch.autograd.Variable(f, requires_grad=False)
 
     def forward(self, x):
         h, impute, imputed = self.generator(x)
@@ -184,18 +217,20 @@ if __name__ == '__main__':
     parser.add_argument('--T_update_F', type=int, required=False, default=1)
     parser.add_argument('--G_steps', type=int, required=False, default=1)
     parser.add_argument('--D_steps', type=int, required=False, default=1)
-    parser.add_argument('--epoch', type=int, required=False, default=500)
-    parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
-    parser.add_argument('--dataset_name', type=str, required=False, default='BloodSample') #  HouseVote
-    parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
-    parser.add_argument('--G_hiddensize', type=int, required=False, default=200)
+    parser.add_argument('--epoch', type=int, required=False, default=30)
     parser.add_argument('--G_layer', type=int, required=False, default=1)
     parser.add_argument('--IsD', type=bool, required=False, default=False)
     parser.add_argument('--cell_type', type=str, required=False, default='gru')
     parser.add_argument('--data_dir', type=str, required=False, default='dataset')
-    parser.add_argument('--seq_len', type=int, required=False, default=200)
-    parser.add_argument('--gpu_num', type=int, required=False, default=0)
+    parser.add_argument('--gpu_num', type=int, required=False, default=1)
+    parser.add_argument('--seq_len', type=int, required=False, default=48)
+    parser.add_argument('--learning_rate', type=float, required=False, default=5e-3)
+    parser.add_argument('--lambda_kmeans', type=float, required=False, default=1e-3)
+    parser.add_argument('--input_dim', type=int, required=False, default=1)
+    parser.add_argument('--G_hiddensize', type=int, required=False, default=20 * 10)
+    parser.add_argument('--k_cluster', type=int, required=False, default=30)
 
     config = parser.parse_args()
-
+    device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
     m = CRLI(config)
+    m.to(device)
