@@ -45,7 +45,7 @@ def run(config):
     GLOBAL_STEP = -1
 
     m = CRLI(config)
-    m.to(torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu'))
+    m.to(torch.device(f'cuda' if torch.cuda.is_available() else 'cpu'))
 
     gen_params = []
     disc_params = []
@@ -206,11 +206,11 @@ if __name__ == '__main__':
                     config.lambda_kmeans = lambda_kmeans
                     config.G_steps = G_steps
                     experiment_name = f"lambda_{lambda_kmeans}_l_{g_layer}_g_{G_steps}"
-                    wandb.init(config=config, project=f'crli_{nm_dataset}_300', name=experiment_name)
+                    wandb.init(config=config, project=f'crli_{nm_dataset}_300', name=experiment_name, entity="dataknows")
                     wandb.config.update(config, allow_val_change=True)
                     wandb_metric_table = wandb.Table(columns=['nm_dataset', 'ri', 'nmi', 'pur', 'cluster_acc'])
                     ri, nmi, pur, cluster_acc = run(config)
                     wandb_metric_table.add_data(nm_dataset, ri, nmi, pur, cluster_acc)
-                    wandb.log("metrics", wandb_metric_table)
+                    wandb.log({"metrics": wandb_metric_table})
                     wandb.finish()
                     print('dataset name : %s,  ri : %.6f, nmi : %.6f, pur : %.6f, accuracy : %.6f' % (config.dataset_name, ri, nmi, pur, cluster_acc))

@@ -11,7 +11,7 @@ class Generator(nn.Module):
         self.rnn_hid_size = config.G_hiddensize
         self.seq_len = self.config.seq_len
         self.input_dim = self.config.input_dim
-        self.device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(f'cuda' if torch.cuda.is_available() else 'cpu')
 
         # https://towardsdatascience.com/from-a-lstm-cell-to-a-multilayer-lstm-network-with-pytorch-2899eb5696f3
         self.fwd_rnn_cell = nn.ModuleList(
@@ -58,11 +58,11 @@ class Generator(nn.Module):
         h_bwds, c_bwds = [], []
 
         for layer in range(self.config.G_layer):
-            h_fwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))   # (B, H)
-            c_fwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))  # (B, H)
+            h_fwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))).to(self.device))   # (B, H)
+            c_fwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))).to(self.device))  # (B, H)
 
-            h_bwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))   # (B, H)
-            c_bwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))))  # (B, H)
+            h_bwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))).to(self.device))   # (B, H)
+            c_bwds.append(Variable(torch.zeros((fwd_values.size()[0], self.rnn_hid_size))).to(self.device))  # (B, H)
 
         # append first identifier to data (B, T, 1)
         # for the first time, we set first value as for equation(5).
@@ -124,15 +124,17 @@ class Decoder(nn.Module):
         self.input_dim = self.config.input_dim
         self.seq_len = config.seq_len
 
+        self.device = torch.device(f'cuda' if torch.cuda.is_available() else 'cpu')
+
     def forward(self, x):  # bi-rnn -> forward states + backward states
         batch_size = x.size()[0]
 
         # todo : 여기 start value를 어떻게 정의해야하나?
-        start_value = Variable(torch.ones(batch_size, self.rnn_hid_size), requires_grad=False) * 128
+        start_value = Variable(torch.ones(batch_size, self.rnn_hid_size), requires_grad=False).to(self.device) * 128
         start_value = start_value
 
-        h = Variable(torch.zeros((batch_size, self.rnn_hid_size))) # (B, H)
-        c = Variable(torch.zeros((batch_size, self.rnn_hid_size))) # (B, H)
+        h = Variable(torch.zeros((batch_size, self.rnn_hid_size)).to(self.device)) # (B, H)
+        c = Variable(torch.zeros((batch_size, self.rnn_hid_size)).to(self.device)) # (B, H)
 
         if torch.cuda.is_available():
             h, c = h.cuda(), c.cuda()
@@ -179,7 +181,8 @@ class CRLI(nn.Module):
 
         super(CRLI, self).__init__()
         self.config = config
-
+        self.device = torch.device(f'cuda' if torch.cuda.is_available() else 'cpu')
+        
         # start branch
         self.generator = Generator(config=config)
 
@@ -187,8 +190,10 @@ class CRLI(nn.Module):
         self.discriminator = Discriminator(self.config)
 
         # lower branch
-        self.fully_connected = nn.Linear(rnn_hid_size, latent_dim)
+        self.fully_connected = nn.Linear(rnn_hid_size, latent_dim).to(self.device)
         self.decoder = Decoder(config, rnn_hid_size, output_dim)
+
+        
 
         # spectral relaxation for k-means clustering
         # F is a cluster indicator matrix with shape of N x k (k is number of cluster in this dataset)
@@ -196,7 +201,7 @@ class CRLI(nn.Module):
         # Ky fan theorem, F can be obtained by computing the k-truncated singular value decomposition of H
         f = torch.empty(config.batch_size, config.k_cluster, dtype=torch.float32)
         torch.nn.init.orthogonal_(f, gain=1)  # by equation 9  F^TxF = I
-        self.F = torch.autograd.Variable(f, requires_grad=False)
+        self.F = torch.autograd.Variable(f, requires_grad=False).to(self.device)
 
     def forward(self, x):
         h, impute, imputed = self.generator(x)
@@ -231,6 +236,6 @@ if __name__ == '__main__':
     parser.add_argument('--k_cluster', type=int, required=False, default=30)
 
     config = parser.parse_args()
-    device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda' if torch.cuda.is_available() else 'cpu')
     m = CRLI(config)
     m.to(device)

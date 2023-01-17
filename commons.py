@@ -24,7 +24,7 @@ def get_args():
     parser.add_argument('--input_dim', type=int, required=False, default=1)
     parser.add_argument('--G_hiddensize', type=int, required=False, default=20 * 10)
     parser.add_argument('--k_cluster', type=int, required=False, default=30)
-    parser.add_argument('--nm_datasets', type=str, nargs='+', required=True, choices=[
+    parser.add_argument('--nm_datasets', type=list, default=[
         "Physionet 2012",
         "alizadeh-2000-v1-filter",
         "alizadeh-2000-v2-filter",
@@ -50,7 +50,8 @@ def get_args():
     datasets = {}
     for nm in args.nm_datasets:
         datasets[nm] = dataset_info[nm]
-    args.datasets
+    args.datasets = datasets
+
     return args
 
 
@@ -137,7 +138,7 @@ def get_batch(data, mask, config):
     samples_num = data.shape[0]
     batch_num = int(samples_num / config.batch_size)
     left_row = samples_num - batch_num * config.batch_size
-    device = torch.device(f'cuda:{config.gpu_num}' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(f'cuda' if torch.cuda.is_available() else 'cpu')
 
     data = torch.from_numpy(data).to(device)
     mask = torch.Tensor(mask).to(device)
